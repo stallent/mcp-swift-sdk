@@ -154,7 +154,7 @@ public enum CallTool: Method {
 
     public struct Result: Hashable, Codable, Sendable {
         public let content: [Tool.Content]
-        public let isError: Bool
+        public let isError: Bool?
 
         public init(content: [Tool.Content], isError: Bool) {
             self.content = content
