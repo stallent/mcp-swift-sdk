@@ -349,7 +349,7 @@ public actor Client {
         _ = try checkCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments))
         let result = try await send(request)
-        return (content: result.content, isError: result.isError)
+        return (content: result.content, isError: result.isError ?? false)
     }
 
     // MARK: -
