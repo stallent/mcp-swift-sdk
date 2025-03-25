@@ -20,6 +20,8 @@ public protocol Transport: Actor {
     func receive() -> AsyncThrowingStream<String, Swift.Error>
 }
 
+/*
+
 /// Standard input/output transport implementation
 public actor StdioTransport: Transport {
     private let input: FileDescriptor
@@ -405,4 +407,7 @@ public actor StdioTransport: Transport {
             }
         }
     }
+ 
+
 #endif
+*/
