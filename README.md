@@ -2,14 +2,14 @@
 
 Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
-> [!TIP]
-> To see it in action, check out the [iMCP app](https://iMCP.app/?ref=mcp-swift-sdk).
-
 ## Requirements
 
 - Swift 6.0+ / Xcode 16+
-- macOS 14.0+ (Sonoma)
-- iOS 17.0+
+- macOS 13.0+
+- iOS / Mac Catalyst 16.0+
+- watchOS 9.0+
+- tvOS 16.0+
+- visionOS 1.0+
 
 ## Installation
 
@@ -19,7 +19,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/loopwork-ai/mcp-swift-sdk.git", from: "0.5.1")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.7.1")
 ]
 ```
 
@@ -136,8 +136,16 @@ let (description, messages) = try await client.getPrompt(
 )
 ```
 
+## Changelog
+
+This project follows [Semantic Versioning](https://semver.org/). 
+For pre-1.0 releases, minor version increments (0.X.0) may contain breaking changes.
+
+For details about changes in each release, 
+see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk/releases).
+
 ## License
 
-This project is licensed under the Apache License, Version 2.0.
+This project is licensed under the MIT License.
 
 [mcp]: https://modelcontextprotocol.io

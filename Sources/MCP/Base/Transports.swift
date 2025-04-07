@@ -1,7 +1,12 @@
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 /// Protocol defining the transport layer for MCP communication
 public protocol Transport: Actor {
@@ -13,11 +18,11 @@ public protocol Transport: Actor {
     /// Disconnects from the transport
     func disconnect() async
 
-    /// Sends a message string
-    func send(_ message: String) async throws
+    /// Sends data
+    func send(_ data: Data) async throws
 
-    /// Receives message strings as an async sequence
-    func receive() -> AsyncThrowingStream<String, Swift.Error>
+    /// Receives data in an async sequence
+    func receive() -> AsyncThrowingStream<Data, Swift.Error>
 }
 
 /*
@@ -29,8 +34,8 @@ public actor StdioTransport: Transport {
     public nonisolated let logger: Logger
 
     private var isConnected = false
-    private let messageStream: AsyncStream<String>
-    private let messageContinuation: AsyncStream<String>.Continuation
+    private let messageStream: AsyncStream<Data>
+    private let messageContinuation: AsyncStream<Data>.Continuation
 
     public init(
         input: FileDescriptor = FileDescriptor.standardInput,
@@ -46,7 +51,7 @@ public actor StdioTransport: Transport {
                 factory: { _ in SwiftLogNoOpLogHandler() })
 
         // Create message stream
-        var continuation: AsyncStream<String>.Continuation!
+        var continuation: AsyncStream<Data>.Continuation!
         self.messageStream = AsyncStream { continuation = $0 }
         self.messageContinuation = continuation
     }
@@ -70,11 +75,11 @@ public actor StdioTransport: Transport {
     private func setNonBlocking(fileDescriptor: FileDescriptor) throws {
         let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
         guard flags >= 0 else {
-            throw Error.transportError(Errno.badFileDescriptor)
+            throw MCPError.transportError(Errno.badFileDescriptor)
         }
         let result = fcntl(fileDescriptor.rawValue, F_SETFL, flags | O_NONBLOCK)
         guard result >= 0 else {
-            throw Error.transportError(Errno.badFileDescriptor)
+            throw MCPError.transportError(Errno.badFileDescriptor)
         }
     }
 
@@ -101,15 +106,13 @@ public actor StdioTransport: Transport {
                     let messageData = pendingData[..<newlineIndex]
                     pendingData = pendingData[(newlineIndex + 1)...]
 
-                    if let message = String(data: messageData, encoding: .utf8),
-                        !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    {
-                        logger.debug("Message received", metadata: ["message": "\(message)"])
-                        messageContinuation.yield(message)
+                    if !messageData.isEmpty {
+                        logger.debug("Message received", metadata: ["size": "\(messageData.count)"])
+                        messageContinuation.yield(Data(messageData))
                     }
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
-                try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
+            } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
+                try? await Task.sleep(for: .milliseconds(10))
                 continue
             } catch {
                 if !Task.isCancelled {
@@ -129,17 +132,16 @@ public actor StdioTransport: Transport {
         logger.info("Transport disconnected")
     }
 
-    public func send(_ message: String) async throws {
+    public func send(_ message: Data) async throws {
         guard isConnected else {
-            throw Error.transportError(Errno.socketNotConnected)
+            throw MCPError.transportError(Errno.socketNotConnected)
         }
 
-        let message = message + "\n"
-        guard let data = message.data(using: .utf8) else {
-            throw Error.transportError(Errno.invalidArgument)
-        }
+        // Add newline as delimiter
+        var messageWithNewline = message
+        messageWithNewline.append(UInt8(ascii: "\n"))
 
-        var remaining = data
+        var remaining = messageWithNewline
         while !remaining.isEmpty {
             do {
                 let written = try remaining.withUnsafeBytes { buffer in
@@ -148,16 +150,16 @@ public actor StdioTransport: Transport {
                 if written > 0 {
                     remaining = remaining.dropFirst(written)
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
-                try await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
+            } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
+                try await Task.sleep(for: .milliseconds(10))
                 continue
             } catch {
-                throw Error.transportError(error)
+                throw MCPError.transportError(error)
             }
         }
     }
 
-    public func receive() -> AsyncThrowingStream<String, Swift.Error> {
+    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 for await message in messageStream {
@@ -178,8 +180,8 @@ public actor StdioTransport: Transport {
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncThrowingStream<String, Swift.Error>
-        private let messageContinuation: AsyncThrowingStream<String, Swift.Error>.Continuation
+        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
         // Track connection state for continuations
         private var connectionContinuationResumed = false
@@ -194,7 +196,7 @@ public actor StdioTransport: Transport {
                 )
 
             // Create message stream
-            var continuation: AsyncThrowingStream<String, Swift.Error>.Continuation!
+            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
             self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
@@ -210,7 +212,7 @@ public actor StdioTransport: Transport {
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.Error.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
@@ -273,7 +275,7 @@ public actor StdioTransport: Transport {
             if !connectionContinuationResumed {
                 connectionContinuationResumed = true
                 logger.warning("Connection cancelled")
-                continuation.resume(throwing: MCP.Error.internalError("Connection cancelled"))
+                continuation.resume(throwing: MCPError.internalError("Connection cancelled"))
             }
         }
 
@@ -285,14 +287,14 @@ public actor StdioTransport: Transport {
             logger.info("Network transport disconnected")
         }
 
-        public func send(_ message: String) async throws {
+        public func send(_ message: Data) async throws {
             guard isConnected else {
-                throw MCP.Error.internalError("Transport not connected")
+                throw MCPError.internalError("Transport not connected")
             }
 
-            guard let data = (message + "\n").data(using: .utf8) else {
-                throw MCP.Error.internalError("Failed to encode message")
-            }
+            // Add newline as delimiter
+            var messageWithNewline = message
+            messageWithNewline.append(UInt8(ascii: "\n"))
 
             // Use a local actor-isolated variable to track continuation state
             var sendContinuationResumed = false
@@ -300,12 +302,12 @@ public actor StdioTransport: Transport {
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.Error.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
                 connection.send(
-                    content: data,
+                    content: messageWithNewline,
                     completion: .contentProcessed { [weak self] error in
                         guard let self = self else { return }
 
@@ -315,7 +317,7 @@ public actor StdioTransport: Transport {
                                 if let error = error {
                                     self.logger.error("Send error: \(error)")
                                     continuation.resume(
-                                        throwing: MCP.Error.internalError("Send error: \(error)"))
+                                        throwing: MCPError.internalError("Send error: \(error)"))
                                 } else {
                                     continuation.resume()
                                 }
@@ -325,7 +327,7 @@ public actor StdioTransport: Transport {
             }
         }
 
-        public func receive() -> AsyncThrowingStream<String, Swift.Error> {
+        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return AsyncThrowingStream { continuation in
                 Task {
                     do {
@@ -353,17 +355,16 @@ public actor StdioTransport: Transport {
                         let messageData = buffer[..<newlineIndex]
                         buffer = buffer[(newlineIndex + 1)...]
 
-                        if let message = String(data: messageData, encoding: .utf8),
-                            !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        {
-                            logger.debug("Message received", metadata: ["message": "\(message)"])
-                            messageContinuation.yield(message)
+                        if !messageData.isEmpty {
+                            logger.debug(
+                                "Message received", metadata: ["size": "\(messageData.count)"])
+                            messageContinuation.yield(Data(messageData))
                         }
                     }
                 } catch let error as NWError {
                     if !Task.isCancelled {
                         logger.error("Network error occurred", metadata: ["error": "\(error)"])
-                        messageContinuation.finish(throwing: MCP.Error.transportError(error))
+                        messageContinuation.finish(throwing: MCPError.transportError(error))
                     }
                     break
                 } catch {
@@ -384,7 +385,7 @@ public actor StdioTransport: Transport {
             return try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Data, Swift.Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.Error.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
@@ -394,12 +395,12 @@ public actor StdioTransport: Transport {
                         if !receiveContinuationResumed {
                             receiveContinuationResumed = true
                             if let error = error {
-                                continuation.resume(throwing: MCP.Error.transportError(error))
+                                continuation.resume(throwing: MCPError.transportError(error))
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else {
                                 continuation.resume(
-                                    throwing: MCP.Error.internalError("No data received"))
+                                    throwing: MCPError.internalError("No data received"))
                             }
                         }
                     }

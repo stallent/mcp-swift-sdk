@@ -60,7 +60,7 @@ extension Method {
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: Error) -> Response<Self> {
+    public static func response(id: ID, error: MCPError) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -161,12 +161,11 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let decoder = JSONDecoder()
 
         // Create a concrete request from the type-erased one
-        let data = try encoder.encode(request.params)
-        let params = try decoder.decode(M.Parameters.self, from: data)
-        let typedRequest = Request<M>(id: request.id, method: M.name, params: params)
+        let data = try encoder.encode(request)
+        let request = try decoder.decode(Request<M>.self, from: data)
 
         // Handle with concrete type
-        let response = try await _handle(typedRequest)
+        let response = try await _handle(request)
 
         // Convert result to AnyMethod response
         switch response.result {
@@ -187,14 +186,14 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response ID.
     public let id: ID
     /// The response result.
-    public let result: Swift.Result<M.Result, Error>
+    public let result: Swift.Result<M.Result, MCPError>
 
     public init(id: ID, result: M.Result) {
         self.id = id
         self.result = .success(result)
     }
 
-    public init(id: ID, error: Error) {
+    public init(id: ID, error: MCPError) {
         self.id = id
         self.result = .failure(error)
     }
@@ -225,7 +224,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         id = try container.decode(ID.self, forKey: .id)
         if let result = try? container.decode(M.Result.self, forKey: .result) {
             self.result = .success(result)
-        } else if let error = try? container.decode(Error.self, forKey: .error) {
+        } else if let error = try? container.decode(MCPError.self, forKey: .error) {
             self.result = .failure(error)
         } else {
             throw DecodingError.dataCorrupted(

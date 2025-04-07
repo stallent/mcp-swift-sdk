@@ -1,5 +1,4 @@
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
 import struct Foundation.Date
@@ -173,15 +172,11 @@ public actor Server {
         task = Task {
             do {
                 let stream = await transport.receive()
-                for try await string in stream {
+                for try await data in stream {
                     if Task.isCancelled { break }  // Check cancellation inside loop
 
                     var requestID: ID?
                     do {
-                        guard let data = string.data(using: .utf8) else {
-                            throw Error.parseError("Invalid UTF-8 data")
-                        }
-
                         // Attempt to decode string data as AnyRequest or AnyMessage
                         let decoder = JSONDecoder()
                         if let request = try? decoder.decode(AnyRequest.self, from: data) {
@@ -200,19 +195,19 @@ public actor Server {
                                     requestID = .number(intValue)
                                 }
                             }
-                            throw Error.parseError("Invalid message format")
+                            throw MCPError.parseError("Invalid message format")
                         }
-                    } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+                    } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
-                        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                        try? await Task.sleep(for: .milliseconds(10))
                         continue
                     } catch {
                         await logger?.error(
                             "Error processing message", metadata: ["error": "\(error)"])
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
-                            error: error as? Error
-                                ?? Error.internalError(error.localizedDescription)
+                            error: error as? MCPError
+                                ?? MCPError.internalError(error.localizedDescription)
                         )
                         try? await send(response)
                     }
@@ -221,6 +216,7 @@ public actor Server {
                 await logger?.error(
                     "Fatal error in message handling loop", metadata: ["error": "\(error)"])
             }
+            await logger?.info("Server finished", metadata: [:])
         }
     }
 
@@ -232,6 +228,10 @@ public actor Server {
             await connection.disconnect()
         }
         connection = nil
+    }
+
+    public func waitUntilCompleted() async {
+        await task?.value
     }
 
     // MARK: - Registration
@@ -262,35 +262,30 @@ public actor Server {
 
     // MARK: - Sending
 
-    /// Send a response to a client
+    /// Send a response to a request
     public func send<M: Method>(_ response: Response<M>) async throws {
         guard let connection = connection else {
-            throw Error.internalError("Server connection not initialized")
+            throw MCPError.internalError("Server connection not initialized")
         }
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
 
         let responseData = try encoder.encode(response)
-
-        if let responseStr = String(data: responseData, encoding: .utf8) {
-            try await connection.send(responseStr)
-        }
+        try await connection.send(responseData)
     }
 
     /// Send a notification to connected clients
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         guard let connection = connection else {
-            throw Error.internalError("Server connection not initialized")
+            throw MCPError.internalError("Server connection not initialized")
         }
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
 
         let notificationData = try encoder.encode(notification)
-
-        if let notificationStr = String(data: notificationData, encoding: .utf8) {
-            try await connection.send(notificationStr)
-        }
+        try await connection.send(notificationData)
     }
 
     // MARK: -
@@ -316,7 +311,7 @@ public actor Server {
 
         // Find handler for method name
         guard let handler = methodHandlers[request.method] else {
-            let error = Error.methodNotFound("Unknown method: \(request.method)")
+            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
             let response = AnyMethod.response(id: request.id, error: error)
             try await send(response)
             throw error
@@ -327,7 +322,7 @@ public actor Server {
             let response = try await handler(request)
             try await send(response)
         } catch {
-            let mcpError = error as? Error ?? Error.internalError(error.localizedDescription)
+            let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             try await send(response)
             throw error
@@ -366,7 +361,7 @@ public actor Server {
 
     private func checkInitialized() throws {
         guard isInitialized else {
-            throw Error.invalidRequest("Server is not initialized")
+            throw MCPError.invalidRequest("Server is not initialized")
         }
     }
 
@@ -376,16 +371,16 @@ public actor Server {
         // Initialize
         withMethodHandler(Initialize.self) { [weak self] params in
             guard let self = self else {
-                throw Error.internalError("Server was deallocated")
+                throw MCPError.internalError("Server was deallocated")
             }
 
             guard await !self.isInitialized else {
-                throw Error.invalidRequest("Server is already initialized")
+                throw MCPError.invalidRequest("Server is already initialized")
             }
 
             // Validate protocol version
             guard Version.latest == params.protocolVersion else {
-                throw Error.invalidRequest(
+                throw MCPError.invalidRequest(
                     "Unsupported protocol version: \(params.protocolVersion)")
             }
 
@@ -403,7 +398,7 @@ public actor Server {
 
             // Send initialized notification after a short delay
             Task {
-                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                try? await Task.sleep(for: .milliseconds(10))
                 try? await self.notify(InitializedNotification.message())
             }
 
